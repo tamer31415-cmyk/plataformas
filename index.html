@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Plataformas: tecnica</title>
+  <style>
+    html, body {
+      background: #111;
+      color: #eee;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0;
+      height: 100%;
+      display: grid;
+      place-items: center;
+    }
+    .wrap {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+    }
+    canvas {
+      background: #1a1a1a;
+      border: 2px solid #333;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .hud {
+      font-size: 14px;
+      color: #bbb;
+      text-align: center;
+      max-width: 800px;
+    }
+    .btn {
+      padding: 8px 12px;
+      border: 1px solid #444;
+      background: #222;
+      color: #ddd;
+      cursor: pointer;
+    }
+    .btn:hover { background: #2a2a2a; }
+    .win {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(2px);
+    }
+    .win.show { display: flex; }
+    .win-box {
+      background: rgba(0,0,0,0.8);
+      border: 1px solid #444;
+      padding: 24px 32px;
+      text-align: center;
+    }
+    .win-title {
+      font-size: 32px;
+      letter-spacing: 0.08em;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="800" height="450"></canvas>
+    <div class="hud">
+      <div><strong>Controles:</strong> Flechas ← → para moverte, ↑ para saltar. Evita los picos y no caigas.</div>
+      <div><strong>Consejo:</strong> Los saltos requieren ritmo; observa los ciclos de las plataformas móviles.</div>
+      <button class="btn" id="reset">Reiniciar</button>
+    </div>
+  </div>
+  <div class="win" id="win">
+    <div class="win-box">
+      <div class="win-title">tecnica</div>
+      <div style="margin-top:8px;color:#aaa;">¡Has llegado a la estrella!</div>
+      <button class="btn" id="playAgain" style="margin-top:12px;">Jugar de nuevo</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    // Input
+    const keys = { left: false, right: false, up: false };
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'ArrowLeft') keys.left = true;
+      if (e.code === 'ArrowRight') keys.right = true;
+      if (e.code === 'ArrowUp') keys.up = true;
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'ArrowLeft') keys.left = false;
+      if (e.code === 'ArrowRight') keys.right = false;
+      if (e.code === 'ArrowUp') keys.up = false;
+    });
+
+    // Player
+    const player = {
+      x: 40, y: H - 80,
+      w: 20, h: 20,
+      vx: 0, vy: 0,
+      onGround: false,
+      coyoteTime: 0,      // margen para saltar un instante tras dejar el suelo
+      jumpBuffer: 0,      // almacena pulsación de salto reciente
+      jumpsUsed: 0,       // permite un micro-segundo de doble impulso si se acierta el timing
+    };
+
+    // Physics
+    const GRAV = 0.7;
+    const MOVE = 2.2;
+    const AIR_CTRL = 0.9;
+    const JUMP_VY = -11.5;
+    const FRICTION = 0.85;
+    const MAX_VX = 4.2;
+    const MAX_VY = 16;
+
+    // Level definition (platforms, spikes, moving platforms, star)
+    // Rects: {x,y,w,h}
+    // Spikes: {x,y,w,h} kill on touch (rendered as triangles)
+    // Movers: {x,y,w,h, ax, ay, range, speed}
+    const level = {
+      spawn: { x: 40, y: H - 80 },
+      platforms: [
+        // suelo base
+        { x: 0, y: H - 40, w: W, h: 40 },
+        // primeras plataformas
+        { x: 120, y: H - 100, w: 120, h: 16 },
+        { x: 280, y: H - 160, w: 100, h: 16 },
+        { x: 420, y: H - 210, w: 90, h: 16 },
+        { x: 540, y: H - 260, w: 100, h: 16 },
+        // zona con trampa de picos y salto preciso
+        { x: 250, y: H - 40, w: 180, h: 16 },
+        { x: 460, y: H - 100, w: 110, h: 16 },
+        // antes de los móviles
+        { x: 620, y: H - 150, w: 100, h: 16 },
+        // plataforma alta final
+        { x: 680, y: H - 240, w: 120, h: 16 },
+      ],
+      spikes: [
+        { x: 250, y: H - 56, w: 40, h: 16 },
+        { x: 300, y: H - 56, w: 40, h: 16 },
+        { x: 350, y: H - 56, w: 40, h: 16 },
+        // picos bajo una plataforma para forzar salto seguro
+        { x: 460, y: H - 116, w: 110, h: 16 },
+      ],
+      movers: [
+        // plataforma horizontal oscilante
+        { x: 200, y: H - 230, w: 90, h: 14, ax: 1, ay: 0, range: 120, speed: 1.6, phase: 0 },
+        // plataforma vertical oscilante
+        { x: 520, y: H - 190, w: 80, h: 14, ax: 0, ay: 1, range: 90, speed: 1.35, phase: Math.PI / 3 },
+        // móvil final más rápida
+        { x: 720, y: H - 200, w: 70, h: 14, ax: 1, ay: 0, range: 140, speed: 2.2, phase: Math.PI / 2 },
+      ],
+      star: { x: 760, y: H - 280, r: 12 }
+    };
+
+    function resetPlayer() {
+      player.x = level.spawn.x;
+      player.y = level.spawn.y;
+      player.vx = 0; player.vy = 0;
+      player.onGround = false;
+      player.coyoteTime = 0;
+      player.jumpBuffer = 0;
+      player.jumpsUsed = 0;
+      hideWin();
+    }
+
+    // Collision helpers
+    function rectsIntersect(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function collidePlatforms(px, py, w, h, vx, vy, plats) {
+      // Sweep axis-aligned resolution
+      let nx = px + vx, ny = py + vy;
+      let onGround = false;
+
+      // Horizontal resolution
+      const boxX = { x: nx, y: py, w, h };
+      for (const p of plats) {
+        if (rectsIntersect(boxX, p)) {
+          if (vx > 0) nx = p.x - w;
+          else if (vx < 0) nx = p.x + p.w;
+          vx = 0;
+        }
+      }
+
+      // Vertical resolution
+      const boxY = { x: nx, y: ny, w, h };
+      for (const p of plats) {
+        if (rectsIntersect(boxY, p)) {
+          if (vy > 0) { // falling
+            ny = p.y - h;
+            onGround = true;
+          } else if (vy < 0) { // rising
+            ny = p.y + p.h;
+          }
+          vy = 0;
+        }
+      }
+
+      return { x: nx, y: ny, vx, vy, onGround };
+    }
+
+    function updateMovers(movers, t) {
+      // t increments each frame
+      const updated = [];
+      for (const m of movers) {
+        const s = Math.sin(m.phase + t * 0.02 * m.speed);
+        const dx = m.ax * s * m.range;
+        const dy = m.ay * s * m.range;
+        updated.push({ ...m, x: m.x + dx, y: m.y + dy });
+      }
+      return updated;
+    }
+
+    // Spike collision approximated as rect hitbox slightly inset
+    function hitSpikes(playerRect, spikes) {
+      for (const s of spikes) {
+        const killBox = { x: s.x, y: s.y + 2, w: s.w, h: s.h - 2 };
+        if (rectsIntersect(playerRect, killBox)) return true;
+      }
+      return false;
+    }
+
+    // Star reach
+    function reachStar(px, py, w, h, star) {
+      const cx = px + w / 2, cy = py + h / 2;
+      const dx = cx - star.x, dy = cy - star.y;
+      return Math.hypot(dx, dy) < star.r + Math.max(w, h) / 2;
+    }
+
+    // Render
+    function draw(level, movers) {
+      ctx.clearRect(0, 0, W, H);
+
+      // background grid subtle
+      ctx.save();
+      ctx.strokeStyle = '#202020';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < W; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 40) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+      ctx.restore();
+
+      // platforms
+      ctx.fillStyle = '#3b3b3b';
+      for (const p of level.platforms) {
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+      }
+
+      // movers (draw darker)
+      ctx.fillStyle = '#2f2f2f';
+      for (const m of movers) {
+        ctx.fillRect(m.x, m.y, m.w, m.h);
+      }
+
+      // spikes
+      for (const s of level.spikes) {
+        ctx.fillStyle = '#7a1b1b';
+        ctx.fillRect(s.x, s.y, s.w, s.h);
+        // triangles
+        const n = 4, tw = s.w / n;
+        for (let i = 0; i < n; i++) {
+          const bx = s.x + i * tw;
+          ctx.beginPath();
+          ctx.moveTo(bx, s.y + s.h);
+          ctx.lineTo(bx + tw / 2, s.y);
+          ctx.lineTo(bx + tw, s.y + s.h);
+          ctx.closePath();
+          ctx.fillStyle = '#b22222';
+          ctx.fill();
+        }
+      }
+
+      // star
+      drawStar(level.star.x, level.star.y, 5, level.star.r, level.star.r / 2, '#f5c400');
+
+      // player
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(player.x, player.y, player.w, player.h);
+
+      // HUD small
+      ctx.fillStyle = '#888';
+      ctx.font = '12px system-ui';
+      ctx.fillText('Tiempo: ' + time.toFixed(1) + 's', 10, 18);
+      ctx.fillText('Reintentos: ' + deaths, 10, 34);
+    }
+
+    function drawStar(cx, cy, spikes, outerR, innerR, color) {
+      const step = Math.PI / spikes;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-Math.PI / 2);
+      ctx.beginPath();
+      for (let i = 0; i < 2 * spikes; i++) {
+        const r = i % 2 === 0 ? outerR : innerR;
+        ctx.lineTo(Math.cos(i * step) * r, Math.sin(i * step) * r);
+      }
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Game loop
+    let t = 0;
+    let time = 0;
+    let deaths = 0;
+    let won = false;
+
+    function showWin() {
+      document.getElementById('win').classList.add('show');
+    }
+    function hideWin() {
+      document.getElementById('win').classList.remove('show');
+      won = false;
+    }
+
+    function step() {
+      t++;
+      if (!won) time += 1 / 60;
+
+      // Input -> velocity
+      const accel = player.onGround ? MOVE : MOVE * AIR_CTRL;
+      if (keys.left) player.vx -= accel * 0.3;
+      if (keys.right) player.vx += accel * 0.3;
+
+      // friction on ground
+      if (player.onGround && !keys.left && !keys.right) {
+        player.vx *= FRICTION;
+        if (Math.abs(player.vx) < 0.02) player.vx = 0;
+      }
+
+      // clamp vx
+      player.vx = Math.max(-MAX_VX, Math.min(MAX_VX, player.vx));
+
+      // gravity
+      player.vy += GRAV;
+      player.vy = Math.min(MAX_VY, player.vy);
+
+      // jump buffering & coyote
+      player.coyoteTime = Math.max(0, player.onGround ? 0.12 : player.coyoteTime - 1/60);
+      player.jumpBuffer = Math.max(0, keys.up ? 0.15 : player.jumpBuffer - 1/60);
+
+      // perform jump
+      const canGroundJump = player.onGround || player.coyoteTime > 0;
+      const canTinyDouble = !player.onGround && player.jumpsUsed === 0 && player.vy > -2.0; // permite un segundo impulso si se saltó hace poco
+      if (player.jumpBuffer > 0 && (canGroundJump || canTinyDouble)) {
+        player.vy = JUMP_VY;
+        player.onGround = false;
+        player.coyoteTime = 0;
+        if (!canGroundJump) player.jumpsUsed = 1;
+        player.jumpBuffer = 0;
+      }
+
+      // movers update
+      const movers = updateMovers(level.movers, t);
+
+      // collision vs platforms + movers (combine)
+      const solid = level.platforms.concat(movers);
+      const res = collidePlatforms(player.x, player.y, player.w, player.h, player.vx, player.vy, solid);
+      player.x = res.x; player.y = res.y; player.vx = res.vx; player.vy = res.vy;
+      const prevGround = player.onGround;
+      player.onGround = res.onGround;
+
+      // reset jumps when landing
+      if (!prevGround && player.onGround) player.jumpsUsed = 0;
+
+      // kill conditions: fall off or spikes
+      const rect = { x: player.x, y: player.y, w: player.w, h: player.h };
+      const dead = player.y > H || hitSpikes(rect, level.spikes);
+      if (dead && !won) {
+        deaths++;
+        resetPlayer();
+      }
+
+      // win condition
+      if (!won && reachStar(player.x, player.y, player.w, player.h, level.star)) {
+        won = true;
+        showWin();
+      }
+
+      draw(level, movers);
+      requestAnimationFrame(step);
+    }
+
+    // Controls: jump buffer on key press
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'ArrowUp') player.jumpBuffer = 0.2;
+    });
+
+    document.getElementById('reset').addEventListener('click', () => {
+      deaths = 0; time = 0;
+      resetPlayer();
+    });
+    document.getElementById('playAgain').addEventListener('click', () => {
+      deaths = 0; time = 0;
+      resetPlayer();
+    });
+
+    // Start
+    resetPlayer();
+    step();
+  </script>
+</body>
+</html>
